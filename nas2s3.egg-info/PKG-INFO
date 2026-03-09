@@ -1,0 +1,68 @@
+Metadata-Version: 2.4
+Name: nas2s3
+Version: 0.1.0
+Summary: Upload files from local/NAS filesystems to S3 with multipart upload, resume support, and progress tracking
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: typer>=0.9.0
+Requires-Dist: rich>=13.0.0
+Requires-Dist: boto3>=1.28.0
+Requires-Dist: pyyaml>=6.0
+
+# nas2s3
+
+Upload files from local or NAS (NFS/SMB) filesystems to Amazon S3 with multipart upload, resume support, and real-time progress tracking.
+
+## Features
+
+- **Single file, multi-file, or full directory uploads** to S3
+- **Multipart upload** with configurable chunk size for large files
+- **Resumable uploads** – interrupted sessions can be continued from where they left off
+- **Network benchmark dry-run** – test connectivity and estimate upload time before committing
+- **Real-time progress** – per-file and overall progress bars with speed and ETA
+- **Glob filtering** – include/exclude files by pattern
+- **Skip existing** – avoid re-uploading files already in S3
+- **Interactive configuration** – guided setup for S3 credentials and defaults
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+## Quick Start
+
+```bash
+# Configure S3 credentials and defaults
+nas2s3 configure
+
+# Upload a single file
+nas2s3 upload report.pdf
+
+# Upload an entire directory recursively
+nas2s3 upload ./data/ -r
+
+# Dry-run with network benchmark
+nas2s3 upload ./data/ -r --dry-run
+
+# Upload only PDFs, skip files already in S3
+nas2s3 upload ./docs/ -r --include "*.pdf" --skip-existing
+
+# Resume an interrupted upload
+nas2s3 upload ./data/ -r --resume
+
+# List files in S3 bucket
+nas2s3 ls
+
+# Check upload session status
+nas2s3 status
+```
+
+## Configuration
+
+Run `nas2s3 configure` to set up your S3 credentials and defaults interactively. Configuration is stored in `~/.nas2s3/config.yaml`.
+
+## License
+
+MIT

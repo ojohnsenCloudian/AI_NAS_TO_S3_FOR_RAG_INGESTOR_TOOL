@@ -1,0 +1,2 @@
+[console_scripts]
+rag-ingestinator = rag_ingestinator.cli:app

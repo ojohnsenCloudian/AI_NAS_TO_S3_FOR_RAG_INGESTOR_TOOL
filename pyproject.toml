@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-ingestinator"
+version = "0.1.0"
+description = "Ingest files from local, NAS (NFS/SMB/CIFS), or GPFS filesystems into S3 with multipart upload, resume support, and progress tracking"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "boto3>=1.28.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+rag-ingestinator = "rag_ingestinator.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["rag_ingestinator*"]

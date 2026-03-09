@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+nas2s3/__init__.py
+nas2s3/__main__.py
+nas2s3/cli.py
+nas2s3/utils.py
+nas2s3.egg-info/PKG-INFO
+nas2s3.egg-info/SOURCES.txt
+nas2s3.egg-info/dependency_links.txt
+nas2s3.egg-info/entry_points.txt
+nas2s3.egg-info/requires.txt
+nas2s3.egg-info/top_level.txt

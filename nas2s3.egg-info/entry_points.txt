@@ -1,0 +1,2 @@
+[console_scripts]
+nas2s3 = nas2s3.cli:app
