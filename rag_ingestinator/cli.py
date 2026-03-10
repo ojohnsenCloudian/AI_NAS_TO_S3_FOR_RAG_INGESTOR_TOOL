@@ -26,6 +26,7 @@ from rag_ingestinator.scanner import scan_paths, ScanResult
 from rag_ingestinator.benchmark import run_benchmark
 from rag_ingestinator.uploader import S3Uploader
 from rag_ingestinator.checkpoint import CheckpointManager
+from rag_ingestinator.audit import AuditLogger, list_log_files, read_log_entries, LOGS_DIR
 from rag_ingestinator.utils import format_size, format_duration, format_speed
 
 console = Console()
@@ -33,7 +34,7 @@ err_console = Console(stderr=True)
 
 app = typer.Typer(
     name="rag-ingestinator",
-    help="Ingest files from local, NAS (NFS/SMB/CIFS), or GPFS filesystems into Amazon S3.",
+    help="Ingest files from local, NAS (NFS/SMB/CIFS), or GPFS filesystems into S3-compatible storage.",
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
@@ -59,7 +60,7 @@ def main(
         False, "--version", "-V", help="Show version and exit.", callback=_version_callback, is_eager=True
     ),
 ) -> None:
-    """Ingest files from local, NAS (NFS/SMB/CIFS), or GPFS filesystems into Amazon S3."""
+    """Ingest files from local, NAS (NFS/SMB/CIFS), or GPFS filesystems into S3-compatible storage."""
 
 
 # ── configure ────────────────────────────────────────────────────────────────
@@ -74,11 +75,21 @@ def configure() -> None:
     def _ask(label: str, default: str, password: bool = False) -> str:
         return Prompt.ask(label, default=default or None, password=password) or ""
 
+    endpoint_url = _ask(
+        "S3 endpoint URL (leave empty for AWS, or enter custom e.g. https://s3.example.com)",
+        existing.endpoint_url,
+    )
+    verify_ssl = True
+    if endpoint_url:
+        verify_ssl = Confirm.ask("Verify SSL certificate?", default=existing.verify_ssl)
+
     cfg = S3Config(
-        aws_access_key_id=_ask("AWS Access Key ID", existing.aws_access_key_id),
-        aws_secret_access_key=_ask("AWS Secret Access Key", existing.aws_secret_access_key, password=True),
-        region=_ask("Default AWS region", existing.region),
-        bucket=_ask("Default S3 bucket name", existing.bucket),
+        aws_access_key_id=_ask("Access Key ID", existing.aws_access_key_id),
+        aws_secret_access_key=_ask("Secret Access Key", existing.aws_secret_access_key, password=True),
+        region=_ask("Region", existing.region),
+        endpoint_url=endpoint_url,
+        verify_ssl=verify_ssl,
+        bucket=_ask("Default bucket name", existing.bucket),
         prefix=_ask("Default S3 key prefix (optional)", existing.prefix),
         chunk_size_mb=IntPrompt.ask("Multipart chunk size (MB)", default=existing.chunk_size_mb or DEFAULT_CHUNK_SIZE_MB),
         concurrency=IntPrompt.ask("Max concurrent uploads", default=existing.concurrency or DEFAULT_CONCURRENCY),
@@ -182,6 +193,18 @@ def upload(
         for f in scan.files:
             cpm.register_file(session, str(f.local_path), f.relative_key, f.size)
 
+    # ── Audit logger ──
+    audit = AuditLogger(session.session_id, effective_bucket, cfg.endpoint_url)
+    audit.log_session_start(
+        total_files=scan.file_count,
+        total_bytes=scan.total_size,
+        source_paths=[str(p) for p in paths],
+        prefix=effective_prefix,
+        concurrency=effective_concurrency,
+        chunk_size_mb=effective_chunk // (1024 * 1024),
+        resume=resume,
+    )
+
     # ── Upload ──
     uploader = S3Uploader(
         cfg,
@@ -189,6 +212,7 @@ def upload(
         bucket=effective_bucket,
         concurrency=effective_concurrency,
         chunk_size=effective_chunk,
+        audit=audit,
     )
 
     def _on_file_done(entry, s3_key, uid, parts):
@@ -200,6 +224,15 @@ def upload(
         checkpoint_cb=_on_file_done,
         resume_info=resume_info,
     )
+
+    audit.log_session_end(
+        completed=stats.completed_files,
+        failed=stats.failed_files,
+        skipped=stats.skipped_files,
+        transferred_bytes=stats.transferred_bytes,
+        elapsed_seconds=stats.elapsed,
+    )
+    console.print(f"[dim]Audit log: {audit.log_path}[/dim]")
 
     if stats.failed_files == 0:
         cpm.delete_session(session.session_id)
@@ -384,3 +417,133 @@ def list_bucket(
         console.print(table)
         if count >= max_keys:
             console.print(f"[dim]Showing first {max_keys} objects. Use --max to increase.[/dim]")
+
+
+# ── logs ─────────────────────────────────────────────────────────────────────
+
+
+@app.command()
+def logs(
+    show: Annotated[Optional[str], typer.Argument(help="Log filename or index (from list) to display.")] = None,
+    tail: Annotated[int, typer.Option("--tail", "-n", help="Show last N entries.")] = 0,
+    json_output: Annotated[bool, typer.Option("--json", help="Output raw JSONL instead of formatted table.")] = False,
+) -> None:
+    """View audit logs from past upload sessions."""
+    log_files = list_log_files()
+
+    if not log_files:
+        console.print("[dim]No audit logs found.[/dim]")
+        console.print(f"[dim]Log directory: {LOGS_DIR}[/dim]")
+        return
+
+    # If no argument, list available logs
+    if show is None:
+        table = Table(title="Audit Logs", expand=False)
+        table.add_column("#", justify="right", style="cyan")
+        table.add_column("Log File")
+        table.add_column("Size", justify="right")
+        table.add_column("Modified")
+
+        for i, lf in enumerate(log_files, 1):
+            stat = lf.stat()
+            modified = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
+            table.add_row(str(i), lf.name, format_size(stat.st_size), modified)
+
+        console.print(table)
+        console.print(f"\n[dim]Log directory: {LOGS_DIR}[/dim]")
+        console.print("[dim]Use [bold]rag-ingestinator logs <#>[/bold] to view a specific log.[/dim]")
+        return
+
+    # Resolve the log file
+    target: Path | None = None
+    try:
+        idx = int(show)
+        if 1 <= idx <= len(log_files):
+            target = log_files[idx - 1]
+    except ValueError:
+        pass
+
+    if target is None:
+        candidate = LOGS_DIR / show
+        if candidate.exists():
+            target = candidate
+
+    if target is None:
+        for lf in log_files:
+            if show in lf.name:
+                target = lf
+                break
+
+    if target is None:
+        err_console.print(f"[red]Log not found:[/red] {show}")
+        raise typer.Exit(1)
+
+    entries = read_log_entries(target)
+
+    if tail > 0:
+        entries = entries[-tail:]
+
+    if json_output:
+        import json as json_mod
+        for entry in entries:
+            console.print(json_mod.dumps(entry, indent=2))
+        return
+
+    # Formatted display
+    console.print(Panel(f"[bold]{target.name}[/bold]", expand=False))
+
+    for entry in entries:
+        event = entry.get("event", "unknown")
+        ts = entry.get("timestamp", "")
+        ts_short = ts[11:19] if len(ts) >= 19 else ts
+
+        if event == "session_start":
+            console.print(f"\n[bold green]SESSION START[/bold green]  {ts}")
+            console.print(f"  User:       {entry.get('user', '?')}@{entry.get('hostname', '?')}")
+            console.print(f"  Bucket:     {entry.get('bucket', '?')}")
+            console.print(f"  Endpoint:   {entry.get('endpoint', '?')}")
+            console.print(f"  Sources:    {', '.join(entry.get('source_paths', []))}")
+            console.print(f"  Files:      {entry.get('total_files', '?')} ({entry.get('total_size_human', '?')})")
+            console.print(f"  Concurrency: {entry.get('concurrency', '?')}, Chunk: {entry.get('chunk_size_mb', '?')} MB")
+            if entry.get("resume"):
+                console.print("  [yellow]Resumed session[/yellow]")
+
+        elif event == "file_done":
+            speed = entry.get("speed_human", "")
+            console.print(
+                f"  [green]OK[/green]  {ts_short}  {entry.get('s3_key', '?')}  "
+                f"{entry.get('size_human', '?')}  {entry.get('elapsed_seconds', '?')}s  {speed}"
+            )
+
+        elif event == "file_error":
+            console.print(
+                f"  [red]FAIL[/red] {ts_short}  {entry.get('s3_key', '?')}  "
+                f"[red]{entry.get('error', '?')}[/red]"
+            )
+
+        elif event == "file_skipped":
+            console.print(
+                f"  [yellow]SKIP[/yellow] {ts_short}  {entry.get('s3_key', '?')}  "
+                f"[dim]{entry.get('reason', '?')}[/dim]"
+            )
+
+        elif event == "file_start":
+            pass  # Don't clutter output with starts; done/error/skip is enough
+
+        elif event == "session_end":
+            console.print(f"\n[bold green]SESSION END[/bold green]    {ts}")
+            console.print(
+                f"  Completed: {entry.get('completed_files', '?')} | "
+                f"Failed: {entry.get('failed_files', '?')} | "
+                f"Skipped: {entry.get('skipped_files', '?')}"
+            )
+            console.print(
+                f"  Transferred: {entry.get('transferred_human', '?')} in {entry.get('elapsed_human', '?')} "
+                f"({entry.get('avg_speed_human', '?')})"
+            )
+
+        elif event == "benchmark":
+            console.print(f"  [cyan]BENCH[/cyan] {ts_short}  Latency: {entry.get('latency_ms', '?')} ms, "
+                          f"Speed: {entry.get('upload_mbps', '?')} Mbps")
+
+    console.print()

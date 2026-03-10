@@ -22,6 +22,8 @@ class S3Config:
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     region: str = "us-east-1"
+    endpoint_url: str = ""  # custom S3 endpoint (e.g. Cloudian HyperStore)
+    verify_ssl: bool = True
     bucket: str = ""
     prefix: str = ""
     chunk_size_mb: int = DEFAULT_CHUNK_SIZE_MB
@@ -81,7 +83,12 @@ def get_boto3_session(cfg: S3Config):
 
 def get_s3_client(cfg: S3Config):
     """Return a boto3 S3 client from config."""
-    return get_boto3_session(cfg).client("s3")
+    kwargs: dict[str, Any] = {}
+    if cfg.endpoint_url:
+        kwargs["endpoint_url"] = cfg.endpoint_url
+    if not cfg.verify_ssl:
+        kwargs["verify"] = False
+    return get_boto3_session(cfg).client("s3", **kwargs)
 
 
 def validate_s3_connection(cfg: S3Config) -> tuple[bool, str]:

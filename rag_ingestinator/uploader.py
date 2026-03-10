@@ -20,6 +20,7 @@ from rag_ingestinator.progress import (
     create_upload_progress,
     render_summary,
 )
+from rag_ingestinator.audit import AuditLogger
 
 ProgressCallback = Callable[[int], None]  # bytes_delta
 
@@ -35,6 +36,7 @@ class S3Uploader:
         bucket: str | None = None,
         concurrency: int | None = None,
         chunk_size: int | None = None,
+        audit: AuditLogger | None = None,
     ) -> None:
         self.cfg = cfg
         self.console = console
@@ -42,6 +44,7 @@ class S3Uploader:
         self.concurrency = concurrency or cfg.concurrency
         self.chunk_size = chunk_size or cfg.chunk_size_bytes
         self.client = get_s3_client(cfg)
+        self.audit = audit
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
 
@@ -203,6 +206,8 @@ class S3Uploader:
             total=stats.total_bytes,
         )
 
+        file_start_times: dict[str, float] = {}
+
         try:
             with progress:
                 with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
@@ -216,6 +221,8 @@ class S3Uploader:
                         if existing_keys is not None and s3_key in existing_keys:
                             stats.skipped_files += 1
                             progress.update(overall_task, advance=entry.size)
+                            if self.audit:
+                                self.audit.log_file_skipped(str(entry.local_path), s3_key, "already exists in S3")
                             continue
 
                         file_task = progress.add_task(
@@ -225,6 +232,10 @@ class S3Uploader:
                         )
 
                         r_info = resume.get(entry.relative_key, {})
+
+                        if self.audit:
+                            self.audit.log_file_start(str(entry.local_path), s3_key, entry.size)
+                        file_start_times[s3_key] = time.monotonic()
 
                         def _do_upload(
                             _entry=entry,
@@ -255,18 +266,25 @@ class S3Uploader:
                         entry = futures[future]
                         try:
                             result_entry, s3_key, uid, parts = future.result()
+                            file_elapsed = time.monotonic() - file_start_times.get(s3_key, time.monotonic())
                             with self._lock:
                                 stats.completed_files += 1
+                            if self.audit:
+                                self.audit.log_file_done(str(result_entry.local_path), s3_key, result_entry.size, file_elapsed)
                             if checkpoint_cb:
                                 checkpoint_cb(result_entry, s3_key, uid, parts)
                         except InterruptedError:
                             with self._lock:
                                 stats.failed_files += 1
                                 stats.errors.append((str(entry.local_path), "Cancelled by user"))
+                            if self.audit:
+                                self.audit.log_file_error(str(entry.local_path), entry.relative_key, "Cancelled by user")
                         except Exception as exc:
                             with self._lock:
                                 stats.failed_files += 1
                                 stats.errors.append((str(entry.local_path), str(exc)))
+                            if self.audit:
+                                self.audit.log_file_error(str(entry.local_path), entry.relative_key, str(exc))
         finally:
             signal.signal(signal.SIGINT, original_sigint)
 
